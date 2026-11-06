@@ -116,7 +116,7 @@ window.__ModuleLoader__.load({
 .ct-tool.is-on { color: #ffffff; background: rgba(255, 255, 255, 0.16); }
 .ct-tool:disabled { opacity: 0.35; cursor: default; background: transparent; }
 .ct-tool:focus-visible, .ct-send:focus-visible, .ct-fab:focus-visible, .ct-chip:focus-visible,
-.ct-copy:focus-visible, .ct-link:focus-visible, .ct-danger:focus-visible, .ct-side:focus-visible,
+.ct-copy:focus-visible, .ct-link:focus-visible, .ct-danger:focus-visible,
 .ct-swap:focus-visible, .ct-page-btn:focus-visible {
   outline: 2px solid #2f86e0;
   outline-offset: 1px;
@@ -418,31 +418,6 @@ window.__ModuleLoader__.load({
   background: #ffffff;
   border: 2px solid #1268c3;
 }
-.ct-side {
-  position: relative;
-  width: 28px;
-  height: 28px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: #1268c3;
-  cursor: pointer;
-}
-.ct-side:hover { background: rgba(18, 104, 195, 0.12); }
-.ct-side.is-open { background: rgba(18, 104, 195, 0.14); }
-.ct-side-dot {
-  position: absolute;
-  right: 4px;
-  bottom: 4px;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #1f9d55;
-}
 .ct-page {
   height: 100%;
   min-height: 0;
@@ -544,8 +519,6 @@ window.__ModuleLoader__.load({
         working: '翻译中…',
         failed: '翻译失败',
         open: '打开外贸回复窗口',
-        openFloat: '打开外贸回复浮动窗',
-        sideLabel: '外贸回复',
       },
       en: {
         title: 'Trade reply',
@@ -577,8 +550,6 @@ window.__ModuleLoader__.load({
         working: 'Translating…',
         failed: 'Translation failed',
         open: 'Open the trade reply window',
-        openFloat: 'Open the floating trade reply window',
-        sideLabel: 'Trade reply',
       },
     }
 
@@ -1416,17 +1387,6 @@ window.__ModuleLoader__.load({
         }, h('path', { d: 'M11 5L5 11M11 9l-2 2' }))))
     }
 
-    function SidebarAction(props) {
-      const { t, mode } = props
-      return h('button', {
-        type: 'button',
-        className: 'ct-side' + (mode === 'open' ? ' is-open' : ''),
-        title: t('openFloat'),
-        'aria-label': t('openFloat'),
-        onClick: () => store.set({ mode: 'open' }),
-      }, icon('bubble', 17), mode === 'open' ? h('span', { className: 'ct-side-dot' }) : null)
-    }
-
     /**
      * The sidebar entry is a launcher, not a page: a plain click opens the
      * floating window and is stopped before the sidebar swaps its panel. This
@@ -1464,12 +1424,7 @@ window.__ModuleLoader__.load({
         return h(FloatSurface, { t, isZh })
       }
       const LauncherRoot = makeLauncher(ctx)
-      function FooterRoot() {
-        const { t } = useI18n(ctx)
-        const state = useStore()
-        return h(SidebarAction, { t, mode: state.mode })
-      }
-      return { OverlayRoot, LauncherRoot, FooterRoot }
+      return { OverlayRoot, LauncherRoot }
     }
 
     return {
@@ -1479,7 +1434,7 @@ window.__ModuleLoader__.load({
         ctx.effect(() => ctx.locale.register('chat-translator', 'en', DICTS.en))
         ctx.effect(() => ctx.locale.register('chat-translator', 'zh', DICTS.zh))
 
-        const { OverlayRoot, LauncherRoot, FooterRoot } = createSurface(ctx)
+        const { OverlayRoot, LauncherRoot } = createSurface(ctx)
 
         const surfaceLabel = () => {
           try {
@@ -1509,13 +1464,6 @@ window.__ModuleLoader__.load({
           order: 40,
           label: surfaceLabel,
         }, OverlayRoot))
-
-        ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
-          name: 'sidebar.footer.action',
-          id: 'chat-translator',
-          order: 20,
-          label: surfaceLabel,
-        }, FooterRoot))
       },
     }
   },
