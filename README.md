@@ -128,10 +128,11 @@ chat-translator/
     "provider": "deepseek-account",
     "model": "deepseek-flash",
     "segments": 1,
-    "mode": "short"
+    "mode": "short",
+    "finishes": ["stop"]
   }
   ```
-  `segments` = 实际分了几块（1 表示没分块），`mode` = `short`（外贸回复口吻）或 `full`（完整逐句翻译）。长文分块时 `segments > 1`，译文块间以空行连接。
+  `segments` = 实际分了几块（1 表示没分块），`mode` = `short`（外贸回复口吻）或 `full`（完整逐句翻译）。长文分块时 `segments > 1`，译文块间以空行连接。`finishes` 是每块模型结束原因（诊断用，`stop` 正常；出现 `length` 说明该块被模型截断）。
 
 ## 常见问题
 

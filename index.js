@@ -314,6 +314,7 @@ export function apply(ctx) {
     const timer = setTimeout(() => controller.abort(new Error('Translation timed out')), CHUNK_TIMEOUT_MS)
     let output = ''
     let failureInfo
+    let finishKind = 'stop'
     try {
       const stream = llm.stream({
         provider: selection.provider,
@@ -326,8 +327,9 @@ export function apply(ctx) {
       })
       for await (const part of stream) {
         if (part.type === 'text-delta') output += part.text
-        else if (part.type === 'finish' && (part.reason.kind === 'error' || part.reason.kind === 'aborted')) {
-          failureInfo = part.reason.failure
+        else if (part.type === 'finish') {
+          if (part.reason.kind === 'error' || part.reason.kind === 'aborted') failureInfo = part.reason.failure
+          else finishKind = part.reason.kind
         }
       }
     } finally {
@@ -343,16 +345,19 @@ export function apply(ctx) {
     if (reply.length === 0) {
       throw Object.assign(new Error('The model returned an empty reply'), { code: 'EMPTY_RESULT' })
     }
-    return reply
+    return { reply, finish: finishKind }
   }
 
   /** Translate every chunk in order and glue the segments back together. */
   async function runChunks(llm, selection, system, chunks) {
     const parts = []
+    const finishes = []
     for (const chunk of chunks) {
-      parts.push(await translateOne(llm, selection, system, chunk))
+      const part = await translateOne(llm, selection, system, chunk)
+      parts.push(part.reply)
+      finishes.push(part.finish)
     }
-    return parts.join('\n\n')
+    return { reply: parts.join('\n\n'), finishes }
   }
 
   async function translate(text, source, target, requested) {
@@ -364,18 +369,19 @@ export function apply(ctx) {
     assertRoutable(selection)
     const chunks = splitText(text, CHUNK_CHARS)
     let full = wantsFullTranslation(text, chunks)
-    let reply
+    let baked
     try {
-      reply = await runChunks(llm, selection, buildPrompt(source, target, full), chunks)
+      baked = await runChunks(llm, selection, buildPrompt(source, target, full), chunks)
     } catch (error) {
       // Some models answer an empty message to the trade prompt; a plain
       // translator instruction usually gets a real reply out of them.
       if (!error || error.code !== 'EMPTY_RESULT') throw error
       full = true
-      reply = await runChunks(llm, selection, buildPlainPrompt(target), chunks)
+      baked = await runChunks(llm, selection, buildPlainPrompt(target), chunks)
     }
     return {
-      reply,
+      reply: baked.reply,
+      finishes: baked.finishes,
       provider: selection.provider,
       model: selection.model,
       segments: chunks.length,
@@ -456,6 +462,7 @@ export function apply(ctx) {
         model: result.model,
         segments: result.segments,
         mode: result.mode,
+        finishes: result.finishes,
         ms: Date.now() - startedAt,
       })
     } catch (error) {
