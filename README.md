@@ -11,16 +11,17 @@ A DSH Web UI plugin: a floating, draggable translation window opened from the le
 - **左侧栏启动键**：点一下图标直接弹出浮动窗口，不切换主画面。
 - **浮动小窗**：拖动标题栏移动、拖右下角改大小、`—` 缩成小圆标、`×` 关闭；**缩成的小圆标可以在界面内自由拖动**并记住位置。
 - **多语种双向互译**：中文、英语、日语、韩语、西班牙语、法语、德语、葡萄牙语、俄语、阿拉伯语、泰语、越南语、印尼语、土耳其语、意大利语；顶部语言栏一键 `⇄` 互换。
+- **模型可选**：语言栏下方一行模型下拉框，列出当前 profile 里所有已配置 provider 及其模型；默认「跟随默认」= DSH 设置里的默认模型，右侧刷新按钮重新拉取列表。
 - **正式外贸口吻**：一到两句、25 词以内、只输出目标语言、保留产品名/价格/数量/交期、不编造现货或优惠。
 - **自动复制**：译文生成后自动进剪贴板，直接去微信 / 1688 粘贴（可关闭）。
 - **历史记录**：勾选删除、一键清空，删除后 6 秒内可撤销。
-- **蓝白配色**，位置、大小、语言对、历史记录自动保存。
+- **蓝白配色**，位置、大小、语言对、所选模型、历史记录自动保存。
 
 ## 安装
 
 ### 前置条件
 
-- 已安装 DSH 桌面端（或 Web 端），并登录了 DeepSeek 账号（插件使用当前 profile 的默认模型，默认 `deepseek-account` / `deepseek-flash`）。
+- 已安装 DSH 桌面端（或 Web 端），并至少登录 / 配置了一个模型服务（插件默认用当前 profile 的默认模型，也可以在浮窗里换）。
 - 插件本身**没有第三方依赖**，不需要 `npm install`，不需要构建。
 
 ### 方式一：本机目录安装（推荐）
@@ -35,7 +36,7 @@ A DSH Web UI plugin: a floating, draggable translation window opened from the le
 
 ### 方式二：从 zip 安装
 
-1. 解压 `chat-translator-1.0.0.zip`，得到 `chat-translator` 文件夹。
+1. 解压 `chat-translator-1.1.0.zip`，得到 `chat-translator` 文件夹。
 2. 按方式一第 2 步操作，路径指向解压后的文件夹。
 
 ### 安装到其他电脑
@@ -50,9 +51,10 @@ A DSH Web UI plugin: a floating, draggable translation window opened from the le
 
 1. 点左侧栏的气泡图标 → 弹出浮动窗口。
 2. 选好原文语言和译文语言（中间 `⇄` 可互换）。
-3. 输入中文，按 **Enter**（`Shift+Enter` 换行）→ 生成译文并自动复制。
-4. 去微信 / 1688 粘贴发送。
-5. 顶栏：剪贴板图标 = 自动复制开关；勾选框 = 批量删除；垃圾桶 = 清空全部；`—` 缩小；`×` 关闭。
+3. （可选）在语言栏下方的模型下拉框里选一个模型；「跟随默认」表示用 DSH 设置里的默认模型。
+4. 输入中文，按 **Enter**（`Shift+Enter` 换行）→ 生成译文并自动复制。
+5. 去微信 / 1688 粘贴发送。
+6. 顶栏：剪贴板图标 = 自动复制开关；勾选框 = 批量删除；垃圾桶 = 清空全部；`—` 缩小；`×` 关闭。
 
 ## 翻译风格与模型
 
@@ -63,7 +65,7 @@ A DSH Web UI plugin: a floating, draggable translation window opened from the le
 - 一到两句、25 词以内；
 - 产品名、价格、数量、尺寸、颜色、交期原样保留，不编造库存或优惠。
 
-模型用当前 profile 的默认模型，可在 DSH 的模型设置里切换。
+默认跟随 DSH 设置里的默认模型；浮窗语言栏下方的下拉框可以直接切到当前 profile 里其他已配置的 provider / 模型（列表由宿主的 `/chat-translator/models` 汇总各 provider 的 `listModels`，右侧刷新按钮可重新拉取）。
 
 ## 目录结构
 
@@ -83,14 +85,32 @@ chat-translator/
 
 插件在宿主侧注册了同源 JSON 接口：
 
-- `GET /chat-translator/health` — 当前 provider / model 与状态。
+- `GET /chat-translator/health` — 版本、输入上限、当前默认 provider / model、模型目录是否可用。
+- `GET /chat-translator/models` — 模型目录（`?refresh=1` 跳过 30 秒缓存）：
+  ```json
+  {
+    "ok": true,
+    "default": { "provider": "new-api", "model": "google/gemini-4-hydrogen" },
+    "providers": [
+      { "id": "deepseek-account", "name": "DeepSeek Account",
+        "models": [{ "id": "deepseek-flash", "name": "DeepSeek-V4.1-Flash" }] }
+    ]
+  }
+  ```
 - `POST /chat-translator/translate`
   ```json
-  { "text": "你好", "sourceLanguage": "Simplified Chinese", "targetLanguage": "English" }
+  {
+    "text": "你好",
+    "sourceLanguage": "Simplified Chinese",
+    "targetLanguage": "English",
+    "provider": "deepseek-account",
+    "model": "deepseek-flash"
+  }
   ```
+  `provider` / `model` 可省略，省略即跟随 profile 默认模型；provider 或模型不在目录里时返回 `400 MODEL_UNAVAILABLE`。
   返回
   ```json
-  { "ok": true, "translation": "Hello" }
+  { "ok": true, "translation": "Hello", "provider": "deepseek-account", "model": "deepseek-flash" }
   ```
 
 ## 常见问题
@@ -100,6 +120,9 @@ chat-translator/
 
 **翻译报错 / 一直转圈？**
 确认已登录 DeepSeek 账号、网络可用；错误信息会显示在消息卡片上（可点「重试」）。
+
+**模型下拉框里没有某个模型？**
+有些 provider（例如只用 API key 的 `deepseek-official`）不会向界面暴露模型列表。先在 DSH 的模型设置里登录 / 配置对应账号，再点浮窗里的刷新按钮重拉一次。
 
 **历史记录存在哪？**
 浏览器 localStorage，键名 `dsh.chat-translator.v2`；清除浏览器数据会一并清空。

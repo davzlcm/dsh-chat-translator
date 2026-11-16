@@ -3,14 +3,20 @@
  *
  * Exposes one small same-origin JSON API under `/chat-translator` for the
  * floating window in the Web UI. Translation runs on the profile's current
- * default model, with a short business-reply system prompt in either
- * direction of the selected language pair.
+ * default model unless the window names another provider/model pair from the
+ * catalog this plugin advertises, with a short business-reply system prompt in
+ * either direction of the selected language pair.
  */
 
 const PREFIX = '/chat-translator'
+const VERSION = 4
 const MAX_INPUT_CHARS = 4000
 const MAX_BODY_BYTES = 128 * 1024
 const REQUEST_TIMEOUT_MS = 90_000
+/** How long the advertised model catalog is reused before asking the adapters again. */
+const MODEL_CACHE_MS = 30_000
+const MAX_PROVIDER_ID_CHARS = 80
+const MAX_MODEL_ID_CHARS = 120
 
 const DEFAULT_SOURCE = 'Simplified Chinese'
 const DEFAULT_TARGET = 'English'
@@ -136,12 +142,91 @@ export function apply(ctx) {
     return { provider: 'deepseek-account', model: 'deepseek-flash' }
   }
 
-  async function translate(text, source, target) {
+  /** The provider/model pair the window asked for, or undefined to follow the profile default. */
+  function requestedModel(body) {
+    const provider = body && typeof body.provider === 'string' ? body.provider.trim() : ''
+    const model = body && typeof body.model === 'string' ? body.model.trim() : ''
+    if (provider.length === 0 || model.length === 0) return undefined
+    if (provider.length > MAX_PROVIDER_ID_CHARS || model.length > MAX_MODEL_ID_CHARS) {
+      throw Object.assign(new Error('That provider or model id is too long'), { code: 'BAD_MODEL' })
+    }
+    return { provider, model }
+  }
+
+  /** Ask every registered adapter for the models it advertises. Never throws for one provider. */
+  async function readCatalog() {
+    const llm = ctx.get('llm')
+    const defaultSelection = currentModel()
+    if (llm === undefined || typeof llm.listProviders !== 'function') {
+      return { default: defaultSelection, providers: [] }
+    }
+    const providers = []
+    for (const info of llm.listProviders()) {
+      const entry = { id: info.id, name: info.name || info.id, models: [] }
+      try {
+        const models = typeof llm.listModels === 'function' ? await llm.listModels(info.id) : []
+        entry.models = (models || []).map(model => ({ id: model.id, name: model.name || model.id }))
+      } catch (error) {
+        entry.error = error && error.message ? error.message : String(error)
+      }
+      providers.push(entry)
+    }
+    return { default: defaultSelection, providers }
+  }
+
+  let cache = { at: 0, value: null, pending: null }
+
+  /** Cached model catalog; `refresh` forces one adapter round trip. */
+  async function modelCatalog(refresh) {
+    const fresh = cache.value !== null && Date.now() - cache.at < MODEL_CACHE_MS
+    if (!refresh && fresh) return cache.value
+    if (cache.pending) return cache.pending
+    cache.pending = readCatalog().then(
+      (value) => {
+        cache = { at: Date.now(), value, pending: null }
+        return value
+      },
+      (error) => {
+        cache.pending = null
+        throw error
+      },
+    )
+    return cache.pending
+  }
+
+  /**
+   * Reject a pair the profile cannot route before the provider I/O starts, so the
+   * window can say "that model is gone" instead of surfacing a wire error.
+   */
+  function assertRoutable(selection) {
+    const llm = ctx.get('llm')
+    if (llm === undefined || typeof llm.listProviders !== 'function') return
+    const providers = llm.listProviders()
+    if (providers.length > 0 && !providers.some(provider => provider.id === selection.provider)) {
+      throw Object.assign(
+        new Error(`The provider "${selection.provider}" is not available in this profile`),
+        { code: 'MODEL_UNAVAILABLE' },
+      )
+    }
+    if (cache.value === null) return
+    const entry = cache.value.providers.find(provider => provider.id === selection.provider)
+    if (entry === undefined || entry.models.length === 0) return
+    if (!entry.models.some(model => model.id === selection.model)) {
+      throw Object.assign(
+        new Error(`The model "${selection.model}" is not available on "${selection.provider}"`),
+        { code: 'MODEL_UNAVAILABLE' },
+      )
+    }
+  }
+
+  async function translate(text, source, target, requested) {
     const llm = ctx.get('llm')
     if (llm === undefined || typeof llm.stream !== 'function') {
       throw Object.assign(new Error('The model service is not available in this profile'), { code: 'LLM_UNAVAILABLE' })
     }
-    const { provider, model } = currentModel()
+    const selection = requested || currentModel()
+    assertRoutable(selection)
+    const { provider, model } = selection
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(new Error('Translation timed out')), REQUEST_TIMEOUT_MS)
     let output = ''
@@ -190,12 +275,28 @@ export function apply(ctx) {
       const model = currentModel()
       return sendJson(res, 200, {
         ok: true,
-        version: 3,
+        version: VERSION,
         maxInputChars: MAX_INPUT_CHARS,
         provider: model.provider,
         model: model.model,
         llm: ctx.get('llm') !== undefined,
+        models: typeof ctx.get('llm')?.listModels === 'function',
       })
+    }
+
+    if (op === 'models') {
+      if (req.method !== 'GET' && req.method !== 'HEAD') {
+        return failure(res, 405, 'METHOD_NOT_ALLOWED', 'Use GET for this endpoint')
+      }
+      const refresh = url.searchParams.get('refresh') === '1'
+      try {
+        const catalog = await modelCatalog(refresh)
+        return sendJson(res, 200, { ok: true, ...catalog })
+      } catch (error) {
+        const message = error && error.message ? error.message : String(error)
+        ctx.logger?.warn?.('[chat-translator] model catalog failed: %s', message)
+        return failure(res, 502, 'CATALOG_FAILED', message)
+      }
     }
 
     if (op !== 'translate') {
@@ -224,7 +325,7 @@ export function apply(ctx) {
 
     const startedAt = Date.now()
     try {
-      const result = await translate(text, source, target)
+      const result = await translate(text, source, target, requestedModel(body))
       return sendJson(res, 200, {
         ok: true,
         translation: result.reply,
@@ -238,7 +339,8 @@ export function apply(ctx) {
       const code = error && typeof error.code === 'string' ? error.code : 'TRANSLATION_FAILED'
       const message = error && error.message ? error.message : String(error)
       ctx.logger?.warn?.('[chat-translator] translation failed: %s', message)
-      return failure(res, 502, code, message)
+      const status = code === 'MODEL_UNAVAILABLE' || code === 'BAD_MODEL' ? 400 : 502
+      return failure(res, status, code, message)
     }
   }
 

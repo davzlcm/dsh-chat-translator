@@ -117,7 +117,7 @@ window.__ModuleLoader__.load({
 .ct-tool:disabled { opacity: 0.35; cursor: default; background: transparent; }
 .ct-tool:focus-visible, .ct-send:focus-visible, .ct-fab:focus-visible, .ct-chip:focus-visible,
 .ct-copy:focus-visible, .ct-link:focus-visible, .ct-danger:focus-visible,
-.ct-swap:focus-visible, .ct-page-btn:focus-visible {
+.ct-swap:focus-visible, .ct-page-btn:focus-visible, .ct-model-refresh:focus-visible {
   outline: 2px solid #2f86e0;
   outline-offset: 1px;
 }
@@ -171,6 +171,36 @@ window.__ModuleLoader__.load({
   cursor: pointer;
 }
 .ct-swap:hover { background: #e8f2fe; border-color: #9dbde0; }
+.ct-models {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 9px;
+  background: #f5f9ff;
+  border-bottom: 1px solid #d8e6f7;
+}
+.ct-model-lead { flex: 0 0 auto; font-size: 11px; color: #5b7391; letter-spacing: 0.02em; }
+.ct-model-wrap { flex: 1 1 auto; }
+.ct-model-refresh {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid #cfdff2;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #1268c3;
+  cursor: pointer;
+}
+.ct-model-refresh:hover:not(:disabled) { background: #e8f2fe; border-color: #9dbde0; }
+.ct-model-refresh:disabled { opacity: 0.55; cursor: default; }
+.ct-model-refresh.is-busy svg { animation: ct-spin 0.9s linear infinite; }
+.ct-select:disabled { opacity: 0.6; cursor: default; }
+@keyframes ct-spin { to { transform: rotate(360deg); } }
 .ct-banner {
   flex: 0 0 auto;
   display: flex;
@@ -519,6 +549,14 @@ window.__ModuleLoader__.load({
         working: '翻译中…',
         failed: '翻译失败',
         open: '打开外贸回复窗口',
+        model: '模型',
+        modelFollow: '跟随默认 · {name}',
+        modelDefault: '跟随默认',
+        modelMissing: '不可用',
+        modelRefresh: '刷新模型列表',
+        modelLoading: '加载中…',
+        modelEmpty: '没有可用模型',
+        configChanged: '模型已更新，刷新后再试',
       },
       en: {
         title: 'Trade reply',
@@ -550,6 +588,14 @@ window.__ModuleLoader__.load({
         working: 'Translating…',
         failed: 'Translation failed',
         open: 'Open the trade reply window',
+        model: 'Model',
+        modelFollow: 'Default · {name}',
+        modelDefault: 'Profile default',
+        modelMissing: 'unavailable',
+        modelRefresh: 'Refresh the model list',
+        modelLoading: 'Loading…',
+        modelEmpty: 'No models available',
+        configChanged: 'The model changed, refresh the list and try again',
       },
     }
 
@@ -602,6 +648,11 @@ window.__ModuleLoader__.load({
           h('path', { d: 'M18 16H7M10 13l-3 3 3 3' }))
       }
       if (name === 'chevron') return h('svg', common, h('path', { d: 'M6 9.5l6 6 6-6' }))
+      if (name === 'refresh') {
+        return h('svg', common,
+          h('path', { d: 'M20 12a8 8 0 1 1-2.6-5.9' }),
+          h('path', { d: 'M20 4.4V9h-4.6' }))
+      }
       if (name === 'popout') {
         return h('svg', common,
           h('rect', { x: 3.5, y: 5, width: 12, height: 12, rx: 2.2 }),
@@ -616,6 +667,18 @@ window.__ModuleLoader__.load({
 
     function fill(template, count) {
       return String(template).replace('{n}', String(count))
+    }
+
+    function fillName(template, name) {
+      return String(template).replace('{name}', String(name))
+    }
+
+    /** Catalog name for one provider/model pair, falling back to the raw model id. */
+    function modelNameOf(catalog, provider, model) {
+      const groups = (catalog && catalog.providers) || []
+      const group = groups.find((item) => item && item.id === provider)
+      const found = group && Array.isArray(group.models) ? group.models.find((item) => item && item.id === model) : null
+      return found && typeof found.name === 'string' && found.name.length > 0 ? found.name : String(model || '')
     }
 
     async function writeClipboard(text) {
@@ -665,6 +728,8 @@ window.__ModuleLoader__.load({
         fabY: null,
         sourceLang: 'zh',
         targetLang: 'en',
+        provider: '',
+        model: '',
         autoCopy: true,
         messages: [],
       }
@@ -697,6 +762,8 @@ window.__ModuleLoader__.load({
       }
       if (LANG_BY_CODE[raw.sourceLang]) state.sourceLang = raw.sourceLang
       if (LANG_BY_CODE[raw.targetLang]) state.targetLang = raw.targetLang
+      if (typeof raw.provider === 'string') state.provider = raw.provider.slice(0, 80)
+      if (typeof raw.model === 'string') state.model = raw.model.slice(0, 120)
       if (typeof raw.autoCopy === 'boolean') state.autoCopy = raw.autoCopy
       if (Array.isArray(raw.messages)) {
         state.messages = raw.messages.map(normalizeMessage).filter(Boolean).slice(-MAX_KEPT)
@@ -739,6 +806,8 @@ window.__ModuleLoader__.load({
             fabY: state.fabY,
             sourceLang: state.sourceLang,
             targetLang: state.targetLang,
+            provider: state.provider,
+            model: state.model,
             autoCopy: state.autoCopy,
             messages: state.messages.slice(-MAX_KEPT),
           }))
@@ -830,9 +899,56 @@ window.__ModuleLoader__.load({
       return language ? language.tag : '?'
     }
 
+    /**
+     * The provider/model catalog the host advertises. Loaded once when the
+     * window mounts; the refresh button asks the adapters again in case the
+     * profile was signed in to another provider mid-session.
+     */
+    function useModelCatalog() {
+      const [catalog, setCatalog] = useState({ providers: [], default: null })
+      const [loading, setLoading] = useState(false)
+      const [error, setError] = useState('')
+      const ticket = useRef(0)
+
+      const reload = useCallback(async (refresh) => {
+        const mine = ++ticket.current
+        setLoading(true)
+        try {
+          const response = await fetch(API + '/models' + (refresh ? '?refresh=1' : ''), {
+            credentials: 'same-origin',
+          })
+          const data = await response.json().catch(() => null)
+          if (!response.ok || !data || data.ok !== true) {
+            throw new Error((data && data.message) || 'HTTP ' + response.status)
+          }
+          if (mine !== ticket.current) return
+          const providers = Array.isArray(data.providers)
+            ? data.providers.filter((entry) => entry && typeof entry.id === 'string' && entry.id.length > 0)
+            : []
+          setCatalog({
+            providers,
+            default: data.default && typeof data.default.provider === 'string' ? data.default : null,
+          })
+          setError('')
+        } catch (problem) {
+          if (mine !== ticket.current) return
+          setError(problem && problem.message ? problem.message : String(problem))
+        } finally {
+          if (mine === ticket.current) setLoading(false)
+        }
+      }, [])
+
+      useEffect(() => {
+        reload(false)
+      }, [reload])
+
+      return { catalog, loading, error, reload }
+    }
+
     /** Everything both surfaces share: history, selection, language pair, sending. */
     function useTranslator(t) {
       const state = useStore()
+      const models = useModelCatalog()
       const [draft, setDraft] = useState('')
       const [busy, setBusy] = useState(false)
       const [copiedId, setCopiedId] = useState(null)
@@ -893,6 +1009,9 @@ window.__ModuleLoader__.load({
               text,
               sourceLanguage: sourceInfo ? sourceInfo.prompt : undefined,
               targetLanguage: targetInfo ? targetInfo.prompt : undefined,
+              ...(current.provider && current.model
+                ? { provider: current.provider, model: current.model }
+                : {}),
             }),
           })
           const data = await response.json().catch(() => null)
@@ -975,6 +1094,17 @@ window.__ModuleLoader__.load({
         store.set({ sourceLang: current.targetLang, targetLang: current.sourceLang })
       }, [])
 
+      /** `value` is `provider|model`, or '' to follow the profile default again. */
+      const chooseModel = useCallback((value) => {
+        if (typeof value !== 'string' || value.length === 0) {
+          store.set({ provider: '', model: '' })
+          return
+        }
+        const at = value.indexOf('|')
+        if (at <= 0 || at === value.length - 1) return
+        store.set({ provider: value.slice(0, at), model: value.slice(at + 1) })
+      }, [])
+
       const copyMessage = useCallback(async (message) => {
         if (!message || !message.targetText) return
         const copied = await writeClipboard(message.targetText)
@@ -1012,6 +1142,12 @@ window.__ModuleLoader__.load({
         swapLanguages,
         copyMessage,
         toggleSelecting,
+        chooseModel,
+        catalog: models.catalog,
+        modelsLoading: models.loading,
+        modelsError: models.error,
+        reloadModels: models.reload,
+        modelValue: state.provider && state.model ? state.provider + '|' + state.model : '',
         pending: messages.some((message) => message.status === 'pending'),
         allSelected: messages.length > 0 && selected.length === messages.length,
       }
@@ -1125,6 +1261,54 @@ window.__ModuleLoader__.load({
               h('button', { type: 'button', className: 'ct-link', onClick: tr.undoRemoval }, t('undo'))))
           : null
 
+      const groups = tr.catalog && Array.isArray(tr.catalog.providers) ? tr.catalog.providers : []
+      const catalogDefault = tr.catalog ? tr.catalog.default : null
+      const defaultLabel = catalogDefault && catalogDefault.model
+        ? fillName(t('modelFollow'), modelNameOf(tr.catalog, catalogDefault.provider, catalogDefault.model))
+        : t('modelDefault')
+      const selectedGroup = tr.state.provider
+        ? groups.find((group) => group.id === tr.state.provider)
+        : null
+      const selectedKnown = Boolean(selectedGroup && Array.isArray(selectedGroup.models)
+        && selectedGroup.models.some((model) => model.id === tr.state.model))
+      const modelRow = h('div', { className: 'ct-models' },
+        h('span', { className: 'ct-model-lead' }, t('model')),
+        h('div', { className: 'ct-select-wrap ct-model-wrap' },
+          h('select', {
+            className: 'ct-select',
+            value: tr.modelValue,
+            title: t('model'),
+            'aria-label': t('model'),
+            onChange: (event) => tr.chooseModel(event.target.value),
+          },
+          h('option', { value: '' }, defaultLabel),
+          groups.map((group) => {
+            const models = Array.isArray(group.models) ? group.models : []
+            if (models.length === 0) return null
+            return h('optgroup', { key: group.id, label: group.name || group.id },
+              models.map((model) => h('option', {
+                key: group.id + '|' + model.id,
+                value: group.id + '|' + model.id,
+              }, model.name || model.id)))
+          }),
+          tr.modelValue && !selectedKnown
+            ? h('option', { value: tr.modelValue },
+              modelNameOf(tr.catalog, tr.state.provider, tr.state.model) + ' · ' + t('modelMissing'))
+            : null,
+          groups.length === 0
+            ? h('option', { value: '', disabled: true },
+              tr.modelsLoading ? t('modelLoading') : t('modelEmpty'))
+            : null),
+          h('span', { className: 'ct-chev' }, icon('chevron', 12))),
+        h('button', {
+          type: 'button',
+          className: 'ct-model-refresh' + (tr.modelsLoading ? ' is-busy' : ''),
+          title: tr.modelsError ? t('modelRefresh') + '：' + tr.modelsError : t('modelRefresh'),
+          'aria-label': t('modelRefresh'),
+          disabled: tr.modelsLoading,
+          onClick: () => tr.reloadModels(true),
+        }, icon('refresh', 13)))
+
       return h(React.Fragment, null,
         h('div', { className: 'ct-langs' },
           h('div', { className: 'ct-select-wrap' },
@@ -1152,6 +1336,7 @@ window.__ModuleLoader__.load({
               onChange: (event) => tr.changeTarget(event.target.value),
             }, LANGS.map((language) => h('option', { key: language.code, value: language.code }, langLabel(language.code, isZh)))),
             h('span', { className: 'ct-chev' }, icon('chevron', 12)))),
+        modelRow,
         banner,
         h('div', { className: 'ct-list', ref: listRef }, messages.length === 0 ? empty : rows),
         h('div', { className: 'ct-compose' },
