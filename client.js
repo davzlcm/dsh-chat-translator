@@ -215,6 +215,7 @@ window.__ModuleLoader__.load({
   font-size: 11.5px;
 }
 .ct-banner.is-undo { background: #eef7ee; border-bottom-color: #d6e8d6; color: #1f6b3a; }
+.ct-banner.is-warn { background: #fff8ec; border-bottom-color: #f2dcb5; color: #8a5a12; }
 .ct-banner-text { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ct-banner-actions { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
 .ct-link {
@@ -559,8 +560,8 @@ window.__ModuleLoader__.load({
         modelGone: '该模型当前不可用，换一个模型再试',
         open: '打开外贸回复窗口',
         model: '模型',
-        modelFollow: '跟随默认 · {name}',
-        modelDefault: '跟随默认',
+        modelPick: '请选择模型',
+        modelRequired: '请先在模型下拉框里选一个模型',
         modelMissing: '不可用',
         modelRefresh: '刷新模型列表',
         modelLoading: '加载中…',
@@ -603,8 +604,8 @@ window.__ModuleLoader__.load({
         modelGone: 'That model is not available — pick another one',
         open: 'Open the trade reply window',
         model: 'Model',
-        modelFollow: 'Default · {name}',
-        modelDefault: 'Profile default',
+        modelPick: 'Choose a model',
+        modelRequired: 'Pick a model in the dropdown first',
         modelMissing: 'unavailable',
         modelRefresh: 'Refresh the model list',
         modelLoading: 'Loading…',
@@ -922,7 +923,7 @@ window.__ModuleLoader__.load({
      * profile was signed in to another provider mid-session.
      */
     function useModelCatalog() {
-      const [catalog, setCatalog] = useState({ providers: [], default: null })
+      const [catalog, setCatalog] = useState({ providers: [] })
       const [loading, setLoading] = useState(false)
       const [error, setError] = useState('')
       const ticket = useRef(0)
@@ -942,10 +943,7 @@ window.__ModuleLoader__.load({
           const providers = Array.isArray(data.providers)
             ? data.providers.filter((entry) => entry && typeof entry.id === 'string' && entry.id.length > 0)
             : []
-          setCatalog({
-            providers,
-            default: data.default && typeof data.default.provider === 'string' ? data.default : null,
-          })
+          setCatalog({ providers })
           setError('')
         } catch (problem) {
           if (mine !== ticket.current) return
@@ -973,8 +971,10 @@ window.__ModuleLoader__.load({
       const [selecting, setSelecting] = useState(false)
       const [selected, setSelected] = useState([])
       const [undo, setUndo] = useState(null)
+      const [notice, setNotice] = useState('')
       const copyTimer = useRef(null)
       const undoTimer = useRef(null)
+      const noticeTimer = useRef(null)
 
       /** A long text is translated chunk by chunk, so show that the request is still alive. */
       useEffect(() => {
@@ -994,6 +994,7 @@ window.__ModuleLoader__.load({
         return () => {
           if (copyTimer.current) clearTimeout(copyTimer.current)
           if (undoTimer.current) clearTimeout(undoTimer.current)
+          if (noticeTimer.current) clearTimeout(noticeTimer.current)
         }
       }, [])
 
@@ -1013,6 +1014,12 @@ window.__ModuleLoader__.load({
         const text = String(raw === undefined ? draft : raw).trim()
         if (!text || busy) return
         const current = store.get()
+        if (!current.provider || !current.model) {
+          setNotice(t('modelRequired'))
+          if (noticeTimer.current) clearTimeout(noticeTimer.current)
+          noticeTimer.current = setTimeout(() => setNotice(''), 4000)
+          return
+        }
         const sourceInfo = LANG_BY_CODE[current.sourceLang]
         const targetInfo = LANG_BY_CODE[current.targetLang]
         const id = 'm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
@@ -1133,7 +1140,7 @@ window.__ModuleLoader__.load({
         store.set({ sourceLang: current.targetLang, targetLang: current.sourceLang })
       }, [])
 
-      /** `value` is `provider|model`, or '' to follow the profile default again. */
+      /** `value` is `provider|model`; an empty value clears the pick (nothing is translated without one). */
       const chooseModel = useCallback((value) => {
         if (typeof value !== 'string' || value.length === 0) {
           store.set({ provider: '', model: '' })
@@ -1188,6 +1195,8 @@ window.__ModuleLoader__.load({
         modelsError: models.error,
         reloadModels: models.reload,
         modelValue: state.provider && state.model ? state.provider + '|' + state.model : '',
+        hasModel: Boolean(state.provider && state.model),
+        notice,
         pending: messages.some((message) => message.status === 'pending'),
         allSelected: messages.length > 0 && selected.length === messages.length,
       }
@@ -1305,10 +1314,6 @@ window.__ModuleLoader__.load({
           : null
 
       const groups = tr.catalog && Array.isArray(tr.catalog.providers) ? tr.catalog.providers : []
-      const catalogDefault = tr.catalog ? tr.catalog.default : null
-      const defaultLabel = catalogDefault && catalogDefault.model
-        ? fillName(t('modelFollow'), modelNameOf(tr.catalog, catalogDefault.provider, catalogDefault.model))
-        : t('modelDefault')
       const selectedGroup = tr.state.provider
         ? groups.find((group) => group.id === tr.state.provider)
         : null
@@ -1324,7 +1329,7 @@ window.__ModuleLoader__.load({
             'aria-label': t('model'),
             onChange: (event) => tr.chooseModel(event.target.value),
           },
-          h('option', { value: '' }, defaultLabel),
+          h('option', { value: '', disabled: true }, t('modelPick')),
           groups.map((group) => {
             const models = Array.isArray(group.models) ? group.models : []
             if (models.length === 0) return null
@@ -1380,6 +1385,10 @@ window.__ModuleLoader__.load({
             }, LANGS.map((language) => h('option', { key: language.code, value: language.code }, langLabel(language.code, isZh)))),
             h('span', { className: 'ct-chev' }, icon('chevron', 12)))),
         modelRow,
+        tr.notice
+          ? h('div', { className: 'ct-banner is-warn' },
+            h('span', { className: 'ct-banner-text' }, tr.notice))
+          : null,
         banner,
         h('div', { className: 'ct-list', ref: listRef }, messages.length === 0 ? empty : rows),
         h('div', { className: 'ct-compose' },
@@ -1400,7 +1409,8 @@ window.__ModuleLoader__.load({
             h('button', {
               type: 'button',
               className: 'ct-send',
-              disabled: tr.busy || tr.draft.trim().length === 0,
+              disabled: tr.busy || !tr.hasModel || tr.draft.trim().length === 0,
+              title: tr.hasModel ? t('send') : t('modelRequired'),
               onClick: () => tr.send(),
             }, tr.busy ? '…' : t('send')))))
     }

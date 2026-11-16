@@ -11,7 +11,7 @@ A DSH Web UI plugin: a floating, draggable translation window opened from the le
 - **左侧栏启动键**：点一下图标直接弹出浮动窗口，不切换主画面。
 - **浮动小窗**：拖动标题栏移动、拖右下角改大小、`—` 缩成小圆标、`×` 关闭；**缩成的小圆标可以在界面内自由拖动**并记住位置。
 - **多语种双向互译**：中文、英语、日语、韩语、西班牙语、法语、德语、葡萄牙语、俄语、阿拉伯语、泰语、越南语、印尼语、土耳其语、意大利语；顶部语言栏一键 `⇄` 互换。
-- **模型可选**：语言栏下方一行模型下拉框，列出当前 profile 里所有已配置 provider 及其模型；默认「跟随默认」= DSH 设置里的默认模型，右侧刷新按钮重新拉取列表。
+- **模型自选**：语言栏下方一行模型下拉框，列出当前 profile 里所有已配置 provider 及其模型；**没有默认模型**，第一次使用先自己选一个（选过的会记住），右侧刷新按钮重新拉取列表。
 - **长文 / 多段对话**：整篇新闻稿、整段聊天记录都能一次翻完（单次上限 20000 字符）。长文本自动分块（每块约 1200 字符）顺序翻译后拼回，提示词切换成「逐句完整翻译、保留段落和说话人」，不再压成一句话；分段时卡片底部标注「分段翻译 · N 段」。
 - **正式外贸口吻**：短句仍按一到两句、25 词以内、只输出目标语言、保留产品名/价格/数量/交期、不编造现货或优惠。
 - **自动复制**：译文生成后自动进剪贴板，直接去微信 / 1688 粘贴（可关闭）。
@@ -22,7 +22,7 @@ A DSH Web UI plugin: a floating, draggable translation window opened from the le
 
 ### 前置条件
 
-- 已安装 DSH 桌面端（或 Web 端），并至少登录 / 配置了一个模型服务（插件默认用当前 profile 的默认模型，也可以在浮窗里换）。
+- 已安装 DSH 桌面端（或 Web 端），并至少登录 / 配置了一个模型服务（第一次翻译时在浮窗里从列表里选一个）。
 - 插件本身**没有第三方依赖**，不需要 `npm install`，不需要构建。
 
 ### 方式一：本机目录安装（推荐）
@@ -37,7 +37,7 @@ A DSH Web UI plugin: a floating, draggable translation window opened from the le
 
 ### 方式二：从 zip 安装
 
-1. 解压 `chat-translator-1.2.0.zip`，得到 `chat-translator` 文件夹。
+1. 解压 `chat-translator-1.3.0.zip`，得到 `chat-translator` 文件夹。
 2. 按方式一第 2 步操作，路径指向解压后的文件夹。
 
 ### 安装到其他电脑
@@ -52,7 +52,7 @@ A DSH Web UI plugin: a floating, draggable translation window opened from the le
 
 1. 点左侧栏的气泡图标 → 弹出浮动窗口。
 2. 选好原文语言和译文语言（中间 `⇄` 可互换）。
-3. （可选）在语言栏下方的模型下拉框里选一个模型；「跟随默认」表示用 DSH 设置里的默认模型。
+3. **先在语言栏下方的模型下拉框里选一个模型**——没有默认模型，不选就无法翻译；列表为空就点右侧刷新按钮。
 4. 输入中文，按 **Enter**（`Shift+Enter` 换行）→ 生成译文并自动复制。短句走「外贸回复」模式；粘贴整篇新闻稿或多段聊天记录时，输入框上方会显示「长文 · N 字 · 完整翻译」，译文按原文段落完整给出，卡片下方标注分了几段。
 5. 去微信 / 1688 粘贴发送。
 6. 顶栏：剪贴板图标 = 自动复制开关；勾选框 = 批量删除；垃圾桶 = 清空全部；`—` 缩小；`×` 关闭。
@@ -77,7 +77,7 @@ A DSH Web UI plugin: a floating, draggable translation window opened from the le
 
 模型没有返回内容时会自动用一条更直白的兜底指令重试一次；仍然为空就提示换一个模型。
 
-默认跟随 DSH 设置里的默认模型；浮窗语言栏下方的下拉框可以直接切到当前 profile 里其他已配置的 provider / 模型（列表由宿主的 `/chat-translator/models` 汇总各 provider 的 `listModels`，右侧刷新按钮可重新拉取）。
+浮窗语言栏下方的下拉框用来选这次翻译用哪个 provider / 模型——**没有默认模型，必须自己选**；列表由宿主的 `/chat-translator/models` 汇总各 provider 的 `listModels`，右侧刷新按钮可重新拉取，选择会在本机记住。
 
 ## 目录结构
 
@@ -97,12 +97,11 @@ chat-translator/
 
 插件在宿主侧注册了同源 JSON 接口：
 
-- `GET /chat-translator/health` — 版本、输入上限（20000）、分块大小（`chunkChars`）、当前默认 provider / model、模型目录是否可用。
+- `GET /chat-translator/health` — 版本、输入上限（20000）、分块大小（`chunkChars`）、`llm` / `models` 是否可用。
 - `GET /chat-translator/models` — 模型目录（`?refresh=1` 跳过 30 秒缓存）：
   ```json
   {
     "ok": true,
-    "default": { "provider": "new-api", "model": "google/gemini-4-hydrogen" },
     "providers": [
       { "id": "deepseek-account", "name": "DeepSeek Account",
         "models": [{ "id": "deepseek-flash", "name": "DeepSeek-V4.1-Flash" }] }
@@ -119,7 +118,7 @@ chat-translator/
     "model": "deepseek-flash"
   }
   ```
-  `provider` / `model` 可省略，省略即跟随 profile 默认模型；provider 或模型不在目录里时返回 `400 MODEL_UNAVAILABLE`。`text` 上限 20000 字符，超限返回 `413 TEXT_TOO_LONG`。
+  `provider` / `model` **必填**（没有默认模型），缺任一项返回 `400 MODEL_REQUIRED`；provider 或模型不在目录里时返回 `400 MODEL_UNAVAILABLE`。`text` 上限 20000 字符，超限返回 `413 TEXT_TOO_LONG`。
   返回
   ```json
   {
@@ -138,6 +137,9 @@ chat-translator/
 
 **左侧栏没有图标？**
 刷新页面；或在 DSH 的插件管理里确认 `@local/chat-translator` 已启用。
+
+**提示「请先在模型下拉框里选一个模型」/ 发送按钮是灰的？**
+这个插件没有默认模型，第一次用要先在语言栏下方的下拉框里选一个；选过之后会记住，除非你清掉浏览器数据或换电脑。
 
 **翻译报错 / 一直转圈？**
 确认已登录 DeepSeek 账号、网络可用；错误信息会显示在消息卡片上（可点「重试」）。

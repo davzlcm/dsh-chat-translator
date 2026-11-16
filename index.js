@@ -9,7 +9,7 @@
  */
 
 const PREFIX = '/chat-translator'
-const VERSION = 5
+const VERSION = 6
 /**
  * A news article or a pasted chat log fits here; longer input is split into
  * chunks below, so this only guards the request body.
@@ -215,23 +215,7 @@ function cleanReply(text) {
 }
 
 export function apply(ctx) {
-  function currentModel() {
-    try {
-      const defaults = ctx.get('agentDefaultModel')
-      const selection = defaults && typeof defaults.currentSelection === 'function'
-        ? defaults.currentSelection()
-        : undefined
-      if (selection && typeof selection.provider === 'string' && selection.provider.length > 0
-        && typeof selection.model === 'string' && selection.model.length > 0) {
-        return { provider: selection.provider, model: selection.model }
-      }
-    } catch {
-      /* fall back to the account default below */
-    }
-    return { provider: 'deepseek-account', model: 'deepseek-flash' }
-  }
-
-  /** The provider/model pair the window asked for, or undefined to follow the profile default. */
+  /** The provider/model pair the window asked for; the window always picks one explicitly. */
   function requestedModel(body) {
     const provider = body && typeof body.provider === 'string' ? body.provider.trim() : ''
     const model = body && typeof body.model === 'string' ? body.model.trim() : ''
@@ -245,9 +229,8 @@ export function apply(ctx) {
   /** Ask every registered adapter for the models it advertises. Never throws for one provider. */
   async function readCatalog() {
     const llm = ctx.get('llm')
-    const defaultSelection = currentModel()
     if (llm === undefined || typeof llm.listProviders !== 'function') {
-      return { default: defaultSelection, providers: [] }
+      return { providers: [] }
     }
     const providers = []
     for (const info of llm.listProviders()) {
@@ -260,7 +243,7 @@ export function apply(ctx) {
       }
       providers.push(entry)
     }
-    return { default: defaultSelection, providers }
+    return { providers }
   }
 
   let cache = { at: 0, value: null, pending: null }
@@ -365,7 +348,13 @@ export function apply(ctx) {
     if (llm === undefined || typeof llm.stream !== 'function') {
       throw Object.assign(new Error('The model service is not available in this profile'), { code: 'LLM_UNAVAILABLE' })
     }
-    const selection = requested || currentModel()
+    const selection = requested
+    if (!selection) {
+      throw Object.assign(
+        new Error('Pick a model in the translator window before translating'),
+        { code: 'MODEL_REQUIRED' },
+      )
+    }
     assertRoutable(selection)
     const chunks = splitText(text, CHUNK_CHARS)
     let full = wantsFullTranslation(text, chunks)
@@ -398,14 +387,11 @@ export function apply(ctx) {
       if (req.method !== 'GET' && req.method !== 'HEAD') {
         return failure(res, 405, 'METHOD_NOT_ALLOWED', 'Use GET for this endpoint')
       }
-      const model = currentModel()
       return sendJson(res, 200, {
         ok: true,
         version: VERSION,
         maxInputChars: MAX_INPUT_CHARS,
         chunkChars: CHUNK_CHARS,
-        provider: model.provider,
-        model: model.model,
         llm: ctx.get('llm') !== undefined,
         models: typeof ctx.get('llm')?.listModels === 'function',
       })
@@ -469,7 +455,7 @@ export function apply(ctx) {
       const code = error && typeof error.code === 'string' ? error.code : 'TRANSLATION_FAILED'
       const message = error && error.message ? error.message : String(error)
       ctx.logger?.warn?.('[chat-translator] translation failed: %s', message)
-      const status = code === 'MODEL_UNAVAILABLE' || code === 'BAD_MODEL' ? 400 : 502
+      const status = code === 'MODEL_UNAVAILABLE' || code === 'BAD_MODEL' || code === 'MODEL_REQUIRED' ? 400 : 502
       return failure(res, status, code, message)
     }
   }
