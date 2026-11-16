@@ -1,8 +1,8 @@
 {
   "name": "@local/chat-translator",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
-  "description": "DSH plugin: a floating two-way trade translator for 1688 and WeChat replies",
+  "description": "DSH plugin: a floating two-way trade translator for 1688 and WeChat replies, with long-text support",
   "license": "MIT",
   "type": "module",
   "keywords": [

@@ -13,6 +13,8 @@ window.__ModuleLoader__.load({
     const DEFAULT_W = 344
     const DEFAULT_H = 480
     const MAX_KEPT = 60
+    /** Same threshold the host uses for "translate in full" instead of a short chat line. */
+    const LONG_TEXT_CHARS = 200
 
     const LANGS = [
       { code: 'zh', tag: '中', zh: '中文', en: 'Chinese', prompt: 'Simplified Chinese' },
@@ -363,17 +365,21 @@ window.__ModuleLoader__.load({
 .ct-compose {
   flex: 0 0 auto;
   display: flex;
-  align-items: flex-end;
-  gap: 6px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 5px;
   padding: 8px 9px 9px;
   border-top: 1px solid #d8e6f7;
   background: #f5f9ff;
 }
+.ct-compose-row { display: flex; align-items: flex-end; gap: 6px; }
+.ct-compose-hint { padding: 0 2px; font-size: 10.5px; color: #5b7391; }
+.ct-note { font-size: 10px; color: #7e94ad; padding-left: 24px; }
 .ct-input {
   flex: 1 1 auto;
   min-width: 0;
   min-height: 34px;
-  max-height: 96px;
+  max-height: 140px;
   padding: 7px 9px;
   resize: none;
   border: 1px solid #cfdff2;
@@ -548,6 +554,9 @@ window.__ModuleLoader__.load({
         emptySub: '自动变成简短的商务外语，复制即可发给客户。',
         working: '翻译中…',
         failed: '翻译失败',
+        emptyModel: '模型没有返回内容，换一个模型再试',
+        tooLong: '内容太长，超出上限，请分批发送',
+        modelGone: '该模型当前不可用，换一个模型再试',
         open: '打开外贸回复窗口',
         model: '模型',
         modelFollow: '跟随默认 · {name}',
@@ -557,6 +566,8 @@ window.__ModuleLoader__.load({
         modelLoading: '加载中…',
         modelEmpty: '没有可用模型',
         configChanged: '模型已更新，刷新后再试',
+        longDraft: '长文 · {n} 字 · 完整翻译',
+        segments: '分段翻译 · {n} 段',
       },
       en: {
         title: 'Trade reply',
@@ -587,6 +598,9 @@ window.__ModuleLoader__.load({
         emptySub: 'Get a short business reply you can paste to your customer.',
         working: 'Translating…',
         failed: 'Translation failed',
+        emptyModel: 'The model returned nothing — try another model',
+        tooLong: 'The text is too long — send it in smaller parts',
+        modelGone: 'That model is not available — pick another one',
         open: 'Open the trade reply window',
         model: 'Model',
         modelFollow: 'Default · {name}',
@@ -596,6 +610,8 @@ window.__ModuleLoader__.load({
         modelLoading: 'Loading…',
         modelEmpty: 'No models available',
         configChanged: 'The model changed, refresh the list and try again',
+        longDraft: 'Long text · {n} characters · translated in full',
+        segments: 'Translated in {n} parts',
       },
     }
 
@@ -749,6 +765,7 @@ window.__ModuleLoader__.load({
         targetLang: LANG_BY_CODE[raw.targetLang] ? raw.targetLang : 'en',
         status: raw.status === 'error' ? 'error' : 'done',
         error: typeof raw.error === 'string' ? raw.error : '',
+        segments: Number.isFinite(raw.segments) ? Math.max(0, Math.round(raw.segments)) : 0,
       }
     }
 
@@ -951,12 +968,27 @@ window.__ModuleLoader__.load({
       const models = useModelCatalog()
       const [draft, setDraft] = useState('')
       const [busy, setBusy] = useState(false)
+      const [elapsed, setElapsed] = useState(0)
       const [copiedId, setCopiedId] = useState(null)
       const [selecting, setSelecting] = useState(false)
       const [selected, setSelected] = useState([])
       const [undo, setUndo] = useState(null)
       const copyTimer = useRef(null)
       const undoTimer = useRef(null)
+
+      /** A long text is translated chunk by chunk, so show that the request is still alive. */
+      useEffect(() => {
+        if (!busy) {
+          setElapsed(0)
+          return undefined
+        }
+        const startedAt = Date.now()
+        setElapsed(0)
+        const timer = setInterval(() => {
+          setElapsed(Math.round((Date.now() - startedAt) / 1000))
+        }, 1000)
+        return () => clearInterval(timer)
+      }, [busy])
 
       useEffect(() => {
         return () => {
@@ -1016,13 +1048,20 @@ window.__ModuleLoader__.load({
           })
           const data = await response.json().catch(() => null)
           if (!response.ok || !data || data.ok !== true) {
-            throw new Error((data && data.message) || 'HTTP ' + response.status)
+            const code = data && data.code
+            const friendly = code === 'EMPTY_RESULT' ? t('emptyModel')
+              : code === 'TEXT_TOO_LONG' ? t('tooLong')
+                : code === 'MODEL_UNAVAILABLE' || code === 'BAD_MODEL' ? t('modelGone')
+                  : null
+            throw new Error(friendly || (data && data.message) || 'HTTP ' + response.status)
           }
           const translation = String(data.translation || '').trim()
-          if (!translation) throw new Error('Empty reply')
+          if (!translation) throw new Error(t('emptyModel'))
           store.set({
             messages: store.get().messages.map((message) => (
-              message.id === id ? { ...message, targetText: translation, status: 'done' } : message
+              message.id === id
+                ? { ...message, targetText: translation, status: 'done', segments: Number(data.segments) || 0 }
+                : message
             )),
           })
           if (store.get().autoCopy) {
@@ -1039,7 +1078,7 @@ window.__ModuleLoader__.load({
         } finally {
           setBusy(false)
         }
-      }, [draft, busy, selecting, markCopied])
+      }, [draft, busy, selecting, markCopied, t])
 
       const retry = useCallback((message) => {
         if (!message || busy) return
@@ -1126,6 +1165,7 @@ window.__ModuleLoader__.load({
         draft,
         setDraft,
         busy,
+        elapsed,
         copiedId,
         selecting,
         selected,
@@ -1202,7 +1242,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'ct-row' },
             h('span', { className: 'ct-tag' }, langTag(message.targetLang)),
             message.status === 'pending'
-              ? h('span', { className: 'ct-working' }, t('working'))
+              ? h('span', { className: 'ct-working' }, t('working') + (tr.elapsed > 0 ? ' ' + tr.elapsed + 's' : ''))
               : message.status === 'error'
                 ? h('span', { className: 'ct-error' }, t('failed') + '：' + (message.error || ''))
                 : h('span', { className: 'ct-out' }, message.targetText),
@@ -1221,7 +1261,10 @@ window.__ModuleLoader__.load({
                   title: copied ? t('copied') : t('copy'),
                   'aria-label': copied ? t('copied') : t('copy'),
                   onClick: () => tr.copyMessage(message),
-                }, icon(copied ? 'check' : 'copy', 14)))))
+                }, icon(copied ? 'check' : 'copy', 14))),
+          message.status === 'done' && Number(message.segments) > 1
+            ? h('div', { className: 'ct-note' }, fill(t('segments'), Number(message.segments)))
+            : null))
       })
 
       const examples = EXAMPLES[tr.state.sourceLang] || []
@@ -1340,22 +1383,26 @@ window.__ModuleLoader__.load({
         banner,
         h('div', { className: 'ct-list', ref: listRef }, messages.length === 0 ? empty : rows),
         h('div', { className: 'ct-compose' },
-          h('textarea', {
-            ref: inputRef,
-            className: 'ct-input',
-            value: tr.draft,
-            rows: 1,
-            placeholder: t('placeholder'),
-            spellCheck: false,
-            onChange: (event) => tr.setDraft(event.target.value),
-            onKeyDown: onComposerKeyDown,
-          }),
-          h('button', {
-            type: 'button',
-            className: 'ct-send',
-            disabled: tr.busy || tr.draft.trim().length === 0,
-            onClick: () => tr.send(),
-          }, tr.busy ? '…' : t('send'))))
+          tr.draft.length > LONG_TEXT_CHARS
+            ? h('div', { className: 'ct-compose-hint' }, fill(t('longDraft'), tr.draft.length))
+            : null,
+          h('div', { className: 'ct-compose-row' },
+            h('textarea', {
+              ref: inputRef,
+              className: 'ct-input',
+              value: tr.draft,
+              rows: 1,
+              placeholder: t('placeholder'),
+              spellCheck: false,
+              onChange: (event) => tr.setDraft(event.target.value),
+              onKeyDown: onComposerKeyDown,
+            }),
+            h('button', {
+              type: 'button',
+              className: 'ct-send',
+              disabled: tr.busy || tr.draft.trim().length === 0,
+              onClick: () => tr.send(),
+            }, tr.busy ? '…' : t('send')))))
     }
 
     function HistoryTools(props) {

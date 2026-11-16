@@ -9,10 +9,19 @@
  */
 
 const PREFIX = '/chat-translator'
-const VERSION = 4
-const MAX_INPUT_CHARS = 4000
-const MAX_BODY_BYTES = 128 * 1024
-const REQUEST_TIMEOUT_MS = 90_000
+const VERSION = 5
+/**
+ * A news article or a pasted chat log fits here; longer input is split into
+ * chunks below, so this only guards the request body.
+ */
+const MAX_INPUT_CHARS = 20000
+const MAX_BODY_BYTES = 256 * 1024
+/** Long input is translated chunk by chunk so no single reply hits an output cap. */
+const CHUNK_CHARS = 1200
+/** Above this length the model translates in full instead of writing a short chat line. */
+const LONG_TEXT_CHARS = 200
+/** Per-chunk model timeout: a full chunk can take a while to generate. */
+const CHUNK_TIMEOUT_MS = 120_000
 /** How long the advertised model catalog is reused before asking the adapters again. */
 const MODEL_CACHE_MS = 30_000
 const MAX_PROVIDER_ID_CHARS = 80
@@ -21,21 +30,101 @@ const MAX_MODEL_ID_CHARS = 120
 const DEFAULT_SOURCE = 'Simplified Chinese'
 const DEFAULT_TARGET = 'English'
 
+/** How many reply tokens one chunk may use: enough for a full translation, never absurd. */
+function replyTokens(chunk) {
+  return Math.min(4096, Math.max(600, Math.ceil(chunk.length * 2.2)))
+}
+
+/**
+ * Split long input on paragraph and sentence boundaries so every model call stays
+ * small and its reply is never cut short by an output token cap.
+ */
+function splitText(text, limit) {
+  const normalised = text.replace(/\r\n?/g, '\n').trim()
+  if (normalised.length <= limit) return [normalised]
+  const blocks = []
+  for (const paragraph of normalised.split(/\n{2,}/)) {
+    const value = paragraph.trim()
+    if (value.length === 0) continue
+    if (value.length <= limit) {
+      blocks.push(value)
+      continue
+    }
+    let buffer = ''
+    for (const sentence of value.match(/[^。！？!?.\n]+[。！？!?.\n]?/g) || [value]) {
+      let piece = sentence
+      while (piece.length > limit) {
+        blocks.push(piece.slice(0, limit))
+        piece = piece.slice(limit)
+      }
+      if (buffer.length > 0 && buffer.length + piece.length > limit) {
+        blocks.push(buffer.trim())
+        buffer = ''
+      }
+      buffer += piece
+    }
+    if (buffer.trim().length > 0) blocks.push(buffer.trim())
+  }
+  const chunks = []
+  let current = ''
+  for (const block of blocks) {
+    if (current.length === 0) current = block
+    else if (current.length + 2 + block.length <= limit) current += '\n\n' + block
+    else {
+      chunks.push(current)
+      current = block
+    }
+  }
+  if (current.trim().length > 0) chunks.push(current.trim())
+  return chunks.length > 0 ? chunks : [normalised]
+}
+
+/**
+ * A pasted transcript, a list or a paragraph is translated in full: the short-reply
+ * prompt only makes sense for one brief chat message.
+ */
+function wantsFullTranslation(text, chunks) {
+  if (chunks.length > 1) return true
+  if (text.length > LONG_TEXT_CHARS) return true
+  return text.split('\n').filter(line => line.trim().length > 0).length >= 2
+}
+
+/** Last-resort instruction: no persona, no tone rules, just the translation. */
+function buildPlainPrompt(target) {
+  return [
+    `Translate the user's message into ${target}.`,
+    `Output only the ${target} translation. Keep every sentence, paragraph and line break.`,
+    'Never answer with an empty message.',
+  ].join('\n')
+}
+
 /** One sentence per rule, checked against the live model before shipping. */
-function buildPrompt(source, target) {
-  const lines = [
-    'You are a foreign-trade sales assistant for a Chinese supplier who sells on 1688 and WeChat.',
-    `Translate the seller's ${source} message into a short, natural, polite business ${target} reply that the seller can send straight to an overseas customer.`,
-    'Rules:',
-    `- Output only the ${target} text. No quotes, no labels, no explanation, no preamble.`,
-    `- Write in ${target}. Never mix in another language unless the original already contains it.`,
-    '- Match the length and intent of the original. A greeting stays a short greeting. Never add a follow-up question, offer or sentence the seller did not write.',
-    '- One or two short sentences at most. Keep it under 25 words whenever the meaning allows.',
-    '- Sound like a real person in a chat, not like machine translation. Plain and friendly.',
-    '- Keep product names, prices, quantities, sizes, colours and dates exactly as written. Never invent facts, stock levels, discounts or delivery promises.',
-    '- If the original is a question for the customer, keep it a question.',
-    '- If the original lists several points, keep the same order as short lines.',
-  ]
+function buildPrompt(source, target, full) {
+  const lines = full
+    ? [
+      'You are a professional translator working for a Chinese foreign-trade supplier.',
+      `Translate the ${source} text below into ${target}.`,
+      'Rules:',
+      `- Output only the ${target} translation. No quotes, no labels, no explanation, no preamble.`,
+      '- Translate every sentence in the original order. Never summarise, shorten, merge or skip anything.',
+      '- Keep the paragraph breaks and list structure of the original: a blank line in the original stays a blank line.',
+      '- If the original is a dialogue or chat log, keep each speaker line on its own line.',
+      '- Keep product names, prices, quantities, sizes, colours, dates, addresses and proper nouns exactly as written. Never invent facts.',
+      `- Write natural, professional ${target} that an overseas customer can read directly.`,
+    ]
+    : [
+      'You are a foreign-trade sales assistant for a Chinese supplier who sells on 1688 and WeChat.',
+      `Translate the seller's ${source} message into a short, natural, polite business ${target} reply that the seller can send straight to an overseas customer.`,
+      'Rules:',
+      `- Output only the ${target} text. No quotes, no labels, no explanation, no preamble.`,
+      `- Write in ${target}. Never mix in another language unless the original already contains it.`,
+      '- Match the length and intent of the original. A greeting stays a short greeting. Never add a follow-up question, offer or sentence the seller did not write.',
+      '- One or two short sentences at most. Keep it under 25 words whenever the meaning allows.',
+      '- Sound like a real person in a chat, not like machine translation. Plain and friendly.',
+      '- Keep product names, prices, quantities, sizes, colours and dates exactly as written. Never invent facts, stock levels, discounts or delivery promises.',
+      '- If the original is a question for the customer, keep it a question.',
+      '- If the original lists several points, keep the same order as short lines.',
+    ]
   if (target === 'English') {
     lines.push('- Use plain, natural trade English, not literary or formal English.')
   }
@@ -219,32 +308,26 @@ export function apply(ctx) {
     }
   }
 
-  async function translate(text, source, target, requested) {
-    const llm = ctx.get('llm')
-    if (llm === undefined || typeof llm.stream !== 'function') {
-      throw Object.assign(new Error('The model service is not available in this profile'), { code: 'LLM_UNAVAILABLE' })
-    }
-    const selection = requested || currentModel()
-    assertRoutable(selection)
-    const { provider, model } = selection
+  /** One model call for one chunk; throws the same codes the endpoint reports. */
+  async function translateOne(llm, selection, system, chunk) {
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(new Error('Translation timed out')), REQUEST_TIMEOUT_MS)
+    const timer = setTimeout(() => controller.abort(new Error('Translation timed out')), CHUNK_TIMEOUT_MS)
     let output = ''
     let failureInfo
     try {
       const stream = llm.stream({
-        provider,
-        model,
-        system: buildPrompt(source, target),
-        messages: [{ role: 'user', content: [{ type: 'text', text }] }],
+        provider: selection.provider,
+        model: selection.model,
+        system,
+        messages: [{ role: 'user', content: [{ type: 'text', text: chunk }] }],
         temperature: 0.3,
-        maxTokens: 600,
+        maxTokens: replyTokens(chunk),
         signal: controller.signal,
       })
-      for await (const chunk of stream) {
-        if (chunk.type === 'text-delta') output += chunk.text
-        else if (chunk.type === 'finish' && (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted')) {
-          failureInfo = chunk.reason.failure
+      for await (const part of stream) {
+        if (part.type === 'text-delta') output += part.text
+        else if (part.type === 'finish' && (part.reason.kind === 'error' || part.reason.kind === 'aborted')) {
+          failureInfo = part.reason.failure
         }
       }
     } finally {
@@ -260,7 +343,44 @@ export function apply(ctx) {
     if (reply.length === 0) {
       throw Object.assign(new Error('The model returned an empty reply'), { code: 'EMPTY_RESULT' })
     }
-    return { reply, provider, model }
+    return reply
+  }
+
+  /** Translate every chunk in order and glue the segments back together. */
+  async function runChunks(llm, selection, system, chunks) {
+    const parts = []
+    for (const chunk of chunks) {
+      parts.push(await translateOne(llm, selection, system, chunk))
+    }
+    return parts.join('\n\n')
+  }
+
+  async function translate(text, source, target, requested) {
+    const llm = ctx.get('llm')
+    if (llm === undefined || typeof llm.stream !== 'function') {
+      throw Object.assign(new Error('The model service is not available in this profile'), { code: 'LLM_UNAVAILABLE' })
+    }
+    const selection = requested || currentModel()
+    assertRoutable(selection)
+    const chunks = splitText(text, CHUNK_CHARS)
+    let full = wantsFullTranslation(text, chunks)
+    let reply
+    try {
+      reply = await runChunks(llm, selection, buildPrompt(source, target, full), chunks)
+    } catch (error) {
+      // Some models answer an empty message to the trade prompt; a plain
+      // translator instruction usually gets a real reply out of them.
+      if (!error || error.code !== 'EMPTY_RESULT') throw error
+      full = true
+      reply = await runChunks(llm, selection, buildPlainPrompt(target), chunks)
+    }
+    return {
+      reply,
+      provider: selection.provider,
+      model: selection.model,
+      segments: chunks.length,
+      mode: full ? 'full' : 'short',
+    }
   }
 
   async function handle(req, res) {
@@ -277,6 +397,7 @@ export function apply(ctx) {
         ok: true,
         version: VERSION,
         maxInputChars: MAX_INPUT_CHARS,
+        chunkChars: CHUNK_CHARS,
         provider: model.provider,
         model: model.model,
         llm: ctx.get('llm') !== undefined,
@@ -333,6 +454,8 @@ export function apply(ctx) {
         targetLanguage: target,
         provider: result.provider,
         model: result.model,
+        segments: result.segments,
+        mode: result.mode,
         ms: Date.now() - startedAt,
       })
     } catch (error) {
